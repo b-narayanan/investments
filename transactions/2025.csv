@@ -1,14 +1,16 @@
 ﻿Trade Date,Type,Ticker,Security Type,Price USD,Quantity,Amount USD
-08/08/2025,Buy,MA,Stock,564.15,0.04837,-27.29
+8/14/2025,Buy,AAPL,Stock,233.5,0.13644,-31.86
+8/14/2025,Dividend,AAPL,Stock,0,0,31.86
 08/08/2025,Dividend,MA,Stock,0,0,27.29
+08/08/2025,Buy,MA,Stock,564.15,0.04837,-27.29
 08/07/2025,DBS,QACDS,Money Market,0,0.01,-0.01
 08/07/2025,Dividend,SCHZ,Stock,0,0,1.2
 08/07/2025,Buy,SCHZ,Stock,23.23,0.05165,-1.2
 08/06/2025,Buy,ASML,Stock,689.15,0.0282,-19.43
 08/06/2025,Dividend,ASML,Stock,0,0,22.86
 08/01/2025,Reinvest,QACDS,Money Market,0,0.66,-0.66
-08/01/2025,Reinvest,VMFXX,Money Market,0,168.2,-168.2
 08/01/2025,Dividend,VMFXX,Money Market,0,0,168.2
+08/01/2025,Reinvest,VMFXX,Money Market,0,168.2,-168.2
 08/01/2025,Interest,,Municipal Bond,0,0,0.66
 7/31/2025,Dividend,QQQ,Stock,0,0,11.84
 7/31/2025,Buy,QQQ,Stock,572.34,0.02068,-11.84

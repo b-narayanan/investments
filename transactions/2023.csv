@@ -96,15 +96,6 @@
 09/01/2023,Dividend,VMFXX,Money Market,0,0,1815.27
 09/01/2023,Reinvest,VMFXX,Money Market,0,1815.27,-1815.27
 09/01/2023,Interest,,Municipal Bond,0,0,0.06
-8/22/2023,WDL,QACDS,Money Market,0,-60000,60000
-8/21/2023,BNK,,Other,0,0,60000
-8/21/2023,DBS,QACDS,Money Market,0,60000,-60000
-8/21/2023,Buy,VMFXX,Money Market,1,60000,-60000
-8/17/2023,Dividend,ATVI,Stock,0,0,50.06
-8/17/2023,Reinvest,ATVI,Stock,0,0.5501,-50.06
-8/17/2023,Dividend,AAPL,Stock,0,0,24.36
-8/17/2023,Reinvest,AAPL,Stock,0,0.13745,-24.36
-Trade Date,Type,Ticker,Security Type,Price USD,Quantity,Amount USD
 08/22/2023,WDL,QACDS,Money Market,0,-60000,60000
 08/21/2023,Buy,VMFXX,Money Market,1,60000,-60000
 08/21/2023,Deposit,,Cash,0,0,60000
