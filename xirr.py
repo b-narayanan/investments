@@ -32,7 +32,7 @@ from typing import List, Tuple, Optional, Dict
 import numpy as np
 import numpy_financial as npf
 import pandas as pd
-import nasdaqdatalink
+import nasdaqdatalink as ndl
 
 # ---------------------------- Configurable sets ----------------------------- #
 # Cash-like tickers to ignore entirely (expand as needed)
@@ -73,7 +73,7 @@ def setup_api():
     api_key = os.getenv("NASDAQ_DATA_LINK_API_KEY")
     if not api_key:
         raise RuntimeError("Set NASDAQ_DATA_LINK_API_KEY in your environment.")
-    nasdaqdatalink.ApiConfig.api_key = api_key
+    ndl.api_config.read_key_from_environment_variable()
 
 
 def normalize_types(s: pd.Series) -> pd.Series:
@@ -95,7 +95,7 @@ def next_trading_close(series: pd.Series, date: pd.Timestamp) -> Tuple[pd.Timest
 def load_sep_prices(tickers: List[str], start: str, end: str) -> Dict[str, pd.Series]:
     out: Dict[str, pd.Series] = {}
     for t in sorted(set(tickers)):
-        dfp = nasdaqdatalink.get(SEP_DATASET, ticker=t, start_date=start, end_date=end)
+        dfp = ndl.get(SEP_DATASET, ticker=t, start_date=start, end_date=end)
         if dfp is None or dfp.empty:
             raise ValueError(f"No SEP data for ticker {t}.")
         # Prefer 'close' if present; fallback sensibly
@@ -124,7 +124,7 @@ def load_dividends_per_share(ticker: str, start: str, end: str, fallback_prices:
     column in SEP for the ticker. Returns empty Series if neither available.
     """
     try:
-        df = nasdaqdatalink.get(SFP_DATASET, ticker=ticker, start_date=start, end_date=end)
+        df = ndl.get(SFP_DATASET, ticker=ticker, start_date=start, end_date=end)
         if df is not None and not df.empty:
             df = df.copy()
             if "date" in df.columns:
@@ -311,7 +311,7 @@ def main():
     # Load benchmark dividends per share (try SFP; fallback to SEP dividends column if present)
     # For fallback, we need the full SEP DF, not just series. Re-query once for benchmark only.
     try:
-        sep_full = nasdaqdatalink.get(SEP_DATASET, ticker=args.benchmark, start_date=start_date, end_date=end_date)
+        sep_full = ndl.get(SEP_DATASET, ticker=args.benchmark, start_date=start_date, end_date=end_date)
         if sep_full is not None and not sep_full.empty:
             sep_full = sep_full.copy()
             if "date" in sep_full.columns:

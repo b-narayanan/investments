@@ -6,17 +6,18 @@ from datetime import datetime, date
 import warnings
 import numpy_financial as npf
 import os
-import requests
-import time
 from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
+import nasdaqdatalink
 
 # Config
 pl.Config.set_tbl_rows(10)
 pl.Config.set_fmt_str_lengths(50)
 sns.set_style('whitegrid')
 warnings.filterwarnings('ignore')
+
+########## Load and clean transaction data ##########
 
 def load_transactions(dirname='/Users/bhargav/Git/investments/transactions'):
     """Load all transaction CSV files and combine them using Polars"""
@@ -127,6 +128,129 @@ def filter_equity_transactions(df, MONEY_MARKET_FUNDS = ['VMFXX', 'QACDS', 'SPAX
     
     return df_filtered
 
+##########  Nasdaq Data Fetching ##########
+
+class NasdaqDataFetcher:
+    """Fetch historical data from Nasdaq Data Link using the official library - returns Polars DataFrames"""
+    
+    def __init__(self, api_key):
+        self.api_key = api_key
+        nasdaqdatalink.ApiConfig.api_key = self.api_key
+        # Configure robustness features
+        nasdaqdatalink.ApiConfig.use_retries = True
+        nasdaqdatalink.ApiConfig.number_of_retries = 3
+        nasdaqdatalink.ApiConfig.retry_status_codes = [429, 500, 501, 502, 503, 504]
+        self.cache = {}
+    
+    def get_price_history(self, ticker: str, start_date: str, end_date: str) -> pl.DataFrame:
+        """Get daily price history for a ticker including adjusted close and dividends using SHARADAR/SEP"""
+        # Check cache first
+        cache_key = f"{ticker}_{start_date}_{end_date}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        if not self.api_key:
+            return pl.DataFrame()
+
+        try:
+            # Use the nasdaq-data-link library to fetch from SHARADAR/SEP table
+            # This provides adjusted close prices and dividend information
+            data = nasdaqdatalink.get_table(
+                'SHARADAR/SEP',
+                ticker=ticker,
+                date={'gte': start_date, 'lte': end_date},
+                qopts={'columns': ['ticker', 'date', 'closeadj', 'divamt']},
+                paginate=True  # Automatically handle pagination for large datasets
+            )
+            
+            if data is not None and not data.empty:
+                # Convert pandas DataFrame to Polars for consistency
+                df = pl.from_pandas(data)
+                
+                # Ensure date column is properly typed
+                if 'date' in df.columns:
+                    df = df.with_columns(
+                        pl.col('date').cast(pl.Date)
+                    ).sort('date')
+                
+                self.cache[cache_key] = df
+                return df
+            else:
+                print(f"No data found for {ticker} in the specified date range")
+                return pl.DataFrame()
+                
+        except nasdaqdatalink.NotFoundError:
+            print(f"Ticker {ticker} not found in SHARADAR/SEP database")
+            return pl.DataFrame()
+            
+        except nasdaqdatalink.LimitExceededError:
+            print(f"API limit exceeded. Please wait.")
+            return pl.DataFrame()
+            
+        except nasdaqdatalink.AuthenticationError:
+            print(f"Authentication failed. Please check your API key.")
+            return pl.DataFrame()
+            
+        except Exception as e:
+            print(f"Error fetching {ticker}: {e}")
+            return pl.DataFrame()
+    
+    def get_fund_prices(self, ticker: str, start_date: str, end_date: str) -> pl.DataFrame:
+        """Get fund prices from SHARADAR/SFP for ETFs and mutual funds"""
+        
+        cache_key = f"fund_{ticker}_{start_date}_{end_date}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        if not self.api_key:
+            return self.get_price_history(ticker, start_date, end_date)  # Use dummy data
+        
+        try:
+            # Try SHARADAR/SFP for funds (ETFs, mutual funds)
+            data = nasdaqdatalink.get_table(
+                'SHARADAR/SFP',
+                ticker=ticker,
+                date={'gte': start_date, 'lte': end_date},
+                qopts={'columns': ['ticker', 'date', 'closeadj', 'divamt']},
+                paginate=True
+            )
+            
+            if data is not None and not data.empty:
+                df = pl.from_pandas(data)
+                if 'date' in df.columns:
+                    df = df.with_columns(
+                        pl.col('date').cast(pl.Date)
+                    ).sort('date')
+                self.cache[cache_key] = df
+                return df
+            else:
+                return pl.DataFrame()
+                
+        except Exception:
+            # If not found in SFP, fallback to SEP
+            return self.get_price_history(ticker, start_date, end_date)
+    
+    def get_ticker_info(self, ticker: str) -> dict:
+        """Get ticker metadata from SHARADAR/TICKERS table"""
+        
+        if not self.api_key:
+            return {}
+        
+        try:
+            data = nasdaqdatalink.get_table(
+                'SHARADAR/TICKERS',
+                ticker=ticker,
+                qopts={'columns': ['ticker', 'name', 'exchange', 'isdelisted', 'category', 'sector', 'industry']}
+            )
+            
+            if data is not None and not data.empty:
+                return data.iloc[0].to_dict()
+            return {}
+            
+        except Exception as e:
+            print(f"Error fetching ticker info for {ticker}: {e}")
+            return {}
+
 if __name__ == "__main__":
     transactions = load_transactions()
     print(f"\nTotal transactions loaded: {len(transactions)}")
@@ -145,3 +269,4 @@ if __name__ == "__main__":
         .to_list()
     )
     print(sorted(unique_tickers))
+    fetcher = NasdaqDataFetcher(os.getenv('NASDAQ_DATA_LINK_API_KEY'))
