@@ -68,7 +68,7 @@ Trade Date,Type,Ticker,Security Type,Price USD,Quantity,Amount USD
 10/22/2021,Reinvest,MTN,Stock,0,0.038,-13.2
 10/20/2021,DEPOSIT,,,0,0,15000
 10/20/2021,DBS,QACDS,Money Market,0,15000,-15000
-10/20/2021,Buy,ASML,Stock,7,759.98,-5319.86
+10/20/2021,Buy,ASML,Stock,759.98,7,-5319.86
 10/15/2021,Dividend,AVB,Stock,0,0,29.36
 10/15/2021,Reinvest,AVB,Stock,0,0.12571,-29.36
 10/08/2021,Dividend,VOX,Stock,0,0,51.59

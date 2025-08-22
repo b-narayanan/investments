@@ -7,12 +7,47 @@ Computes XIRR and compares against VOO benchmark with dividend reinvestment.
 import argparse
 from pathlib import Path
 import os
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, List
 
-import numpy_financial as npf
 import pandas as pd
 from pandas import Timestamp
 import nasdaqdatalink as ndl
+from dotenv import load_dotenv
+from scipy import optimize
+import numpy as np
+import diskcache as dc
+
+# ---------------------------- XIRR Implementation ---------------------------- #
+
+import scipy.optimize
+
+def xnpv(rate, values, dates):
+    '''Equivalent of Excel's XNPV function.
+
+    >>> from datetime import date
+    >>> dates = [date(2010, 12, 29), date(2012, 1, 25), date(2012, 3, 8)]
+    >>> values = [-10000, 20, 10100]
+    >>> xnpv(0.1, values, dates)
+    -966.4345...
+    '''
+    if rate <= -1.0:
+        return float('inf')
+    d0 = dates[0]    # or min(dates)
+    return sum([ vi / (1.0 + rate)**((di - d0).days / 365.0) for vi, di in zip(values, dates)])
+
+def xirr(amounts: List[float], dates: List[Timestamp]) -> float:
+    '''Equivalent of Excel's XIRR function.
+
+    >>> from datetime import date
+    >>> dates = [date(2010, 12, 29), date(2012, 1, 25), date(2012, 3, 8)]
+    >>> values = [-10000, 20, 10100]
+    >>> xirr(values, dates)
+    0.0100612...
+    '''
+    try:
+        return scipy.optimize.newton(lambda r: xnpv(r, amounts, dates), 0.0)
+    except RuntimeError:    # Failed to converge?
+        return scipy.optimize.brentq(lambda r: xnpv(r, amounts, dates), -1.0, 1e10)
 
 # ---------------------------- Configuration ---------------------------- #
 
@@ -40,6 +75,7 @@ def load_transactions(csv_path: Union[str, Path], ignore_cash_equivalents: bool 
     all_transactions = []
     for csv_file in sorted(transactions_dir.glob('*.csv')):
         # Read CSV 
+        print(f"Loading {csv_file.name}")
         df = pd.read_csv(csv_file)
         # Normalize columns
         df["Trade Date"] = pd.to_datetime(df["Trade Date"])
@@ -47,6 +83,7 @@ def load_transactions(csv_path: Union[str, Path], ignore_cash_equivalents: bool 
         df["Ticker"] = df["Ticker"].fillna("").str.strip().str.upper()
         df["Amount USD"] = pd.to_numeric(df["Amount USD"], errors="coerce").fillna(0)
         df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+        df["Price USD"] = pd.to_numeric(df["Price USD"], errors="coerce").fillna(0)
         # Filter out cash equivalents
         if ignore_cash_equivalents:
             df = df[~df["Ticker"].isin(CASH_EQUIVALENTS)]
@@ -72,16 +109,40 @@ def consolidate_transaction_types(df: pd.DataFrame) -> pd.DataFrame:
     df["Type"] = df["Type"].replace(type_map).fillna(df["Type"])
     return df
 
+def filter_out_csv_splits(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove split transactions from CSV data since we'll use market data instead."""
+    print("Filtering out CSV split transactions...")
+    before_count = len(df)
+    
+    # Remove rows where Type indicates a split
+    split_mask = df["Type"].str.upper().isin(["SPLIT", "SPLT", "STK SPLT"])
+    splits_removed = df[split_mask]
+    
+    if not splits_removed.empty:
+        print(f"  Removed {len(splits_removed)} CSV split transactions:")
+        for _, row in splits_removed.iterrows():
+            print(f"    {row['Trade Date']} {row['Ticker']} {row['Type']} Qty={row.get('Quantity', 0)}")
+    
+    df_filtered = df[~split_mask].copy()
+    after_count = len(df_filtered)
+    
+    print(f"  Transactions: {before_count} -> {after_count}")
+    return df_filtered
+
 # ---------------------------- Market Data ---------------------------- #
 
 class MarketDataFetcher:
     """Fetch historical prices and dividends from Nasdaq Data Link."""
     
     def __init__(self):
-        api_key = os.getenv("NASDAQ_DATA_LINK_API_KEY")
-        if api_key:
-            ndl.api_config.read_key_from_environment_variable()
-        self.cache = {}
+        # Ensure API key is configured - ndl reads from environment automatically
+        load_dotenv()  # Make sure .env is loaded
+        ndl.api_config.read_key_from_environment_variable()
+
+        # Setup persistent disk cache (7 days TTL)
+        cache_dir = Path.home() / ".cache" / "xirr_analysis"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache = dc.Cache(str(cache_dir), timeout=7*24*3600)  # 7 day cache
     
     def get_prices(self, ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
         """Get daily closing prices.
@@ -99,11 +160,34 @@ class MarketDataFetcher:
         end_str = end.strftime("%Y-%m-%d")
         cache_key = f"{ticker}_{start_str}_{end_str}_prices"
         
-        if cache_key in self.cache:
-            return self.cache[cache_key]
+        # Check cache first
+        cached_result = self.cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
         
+        # Try SHARADAR/SFP first (for ETFs)
         try:
-            # Try SHARADAR/SEP for equities and ETFs
+            data = ndl.get_table(
+                "SHARADAR/SFP",
+                ticker=ticker,
+                date={"gte": start_str, "lte": end_str},
+                qopts={"columns": ["date", "closeadj"]},
+                paginate=True
+            )
+            
+            if data is not None and not data.empty:
+                # Ensure date index is datetime
+                data['date'] = pd.to_datetime(data['date'])
+                series = data.set_index("date")["closeadj"].sort_index()
+                # Store in persistent cache
+                self.cache[cache_key] = series
+                return series
+                
+        except Exception as e:
+            print(f"Warning: SFP failed for {ticker}: {e}")
+        
+        # Try SHARADAR/SEP as fallback (for stocks)
+        try:
             data = ndl.get_table(
                 "SHARADAR/SEP",
                 ticker=ticker,
@@ -113,14 +197,20 @@ class MarketDataFetcher:
             )
             
             if data is not None and not data.empty:
+                # Ensure date index is datetime
+                data['date'] = pd.to_datetime(data['date'])
                 series = data.set_index("date")["closeadj"].sort_index()
+                # Store in persistent cache
                 self.cache[cache_key] = series
                 return series
                 
         except Exception as e:
-            print(f"Warning: Could not fetch {ticker} prices: {e}")
+            print(f"Warning: SEP failed for {ticker}: {e}")
         
-        return pd.Series(dtype=float)
+        # Cache empty result to avoid repeated API calls
+        empty_series = pd.Series(dtype=float)
+        self.cache[cache_key] = empty_series
+        return empty_series
     
     def get_dividends(self, ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
         """Get dividend per share amounts.
@@ -138,29 +228,130 @@ class MarketDataFetcher:
         end_str = end.strftime("%Y-%m-%d")
         cache_key = f"{ticker}_{start_str}_{end_str}_divs"
         
-        if cache_key in self.cache:
-            return self.cache[cache_key]
+        # Check cache first
+        cached_result = self.cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
         
         try:
-            # Try SHARADAR/SEP for dividend data
+            # Use SHARADAR/ACTIONS for dividend data
             data = ndl.get_table(
-                "SHARADAR/SEP",
+                "SHARADAR/ACTIONS",
                 ticker=ticker,
+                action="dividend",
                 date={"gte": start_str, "lte": end_str},
-                qopts={"columns": ["date", "divamt"]},
+                qopts={"columns": ["date", "value"]},
                 paginate=True
             )
             
             if data is not None and not data.empty:
-                series = data.set_index("date")["divamt"]
+                # Ensure date index is datetime
+                data['date'] = pd.to_datetime(data['date'])
+                series = data.set_index("date")["value"]
                 series = series[series > 0].sort_index()
+                # Store in persistent cache
                 self.cache[cache_key] = series
                 return series
                 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Could not fetch {ticker} dividends: {e}")
         
-        return pd.Series(dtype=float)
+        # Cache empty result to avoid repeated API calls
+        empty_series = pd.Series(dtype=float)
+        self.cache[cache_key] = empty_series
+        return empty_series
+
+    def get_splits(self, ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+        """Get stock splits.
+        
+        Args:
+            ticker: Stock ticker symbol
+            start: Start date as pandas Timestamp
+            end: End date as pandas Timestamp
+        
+        Returns:
+            Series of split ratios indexed by date
+        """
+        # Format dates for caching and API calls
+        start_str = start.strftime("%Y-%m-%d")
+        end_str = end.strftime("%Y-%m-%d")
+        cache_key = f"{ticker}_{start_str}_{end_str}_splits"
+        
+        # Check cache first
+        cached_result = self.cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+        
+        try:
+            # Use SHARADAR/ACTIONS for split data
+            data = ndl.get_table(
+                "SHARADAR/ACTIONS",
+                ticker=ticker,
+                action="split",
+                date={"gte": start_str, "lte": end_str},
+                qopts={"columns": ["date", "value"]},
+                paginate=True
+            )
+            
+            if data is not None and not data.empty:
+                # Ensure date index is datetime
+                data['date'] = pd.to_datetime(data['date'])
+                series = data.set_index("date")["value"]
+                series = series[series > 0].sort_index()
+                # Store in persistent cache
+                self.cache[cache_key] = series
+                return series
+                
+        except Exception as e:
+            print(f"Warning: Could not fetch {ticker} splits: {e}")
+        
+        # Cache empty result to avoid repeated API calls
+        empty_series = pd.Series(dtype=float)
+        self.cache[cache_key] = empty_series
+        return empty_series
+
+def insert_market_splits_as_transactions(df: pd.DataFrame, fetcher: MarketDataFetcher, 
+                                        start_dt: pd.Timestamp, end_dt: pd.Timestamp) -> pd.DataFrame:
+    """Fetch market splits and insert them as transaction rows."""
+    print("Fetching market splits and inserting as transactions...")
+    
+    # Get unique tickers from the dataframe
+    unique_tickers = df[df["Ticker"] != ""]["Ticker"].unique().tolist()
+    
+    split_rows = []
+    for ticker in unique_tickers:
+        if ticker and " " not in ticker:  # Skip options
+            splits = fetcher.get_splits(ticker, start_dt, end_dt)
+            if not splits.empty:
+                print(f"  {ticker}: Found {len(splits)} splits")
+                for date, ratio in splits.items():
+                    # Create a transaction row for the split
+                    split_row = {
+                        'Trade Date': date,
+                        'Type': 'MARKET_SPLIT',
+                        'Ticker': ticker,
+                        'Security Type': 'Stock',
+                        'Price USD': 0,
+                        'Quantity': ratio,  # Split ratio (e.g., 2.0 for 2:1 split)
+                        'Amount USD': 0
+                    }
+                    split_rows.append(split_row)
+                    print(f"    {date.date()}: {ratio}:1 split")
+    
+    if split_rows:
+        split_df = pd.DataFrame(split_rows)
+        # Ensure date column is datetime
+        split_df['Trade Date'] = pd.to_datetime(split_df['Trade Date'])
+        
+        # Combine with original transactions and sort by date
+        combined_df = pd.concat([df, split_df], ignore_index=True)
+        combined_df = combined_df.sort_values('Trade Date').reset_index(drop=True)
+        
+        print(f"  Added {len(split_rows)} market split transactions")
+        return combined_df
+    else:
+        print("  No market splits found")
+        return df
 
 
 # ---------------------------- Portfolio Tracking ---------------------------- #
@@ -208,12 +399,12 @@ class Portfolio:
         self.holdings_history = []  # (date, ticker, shares_held) tracks all changes
     
     def process_transaction(self, row):
-        """Process a single transaction from itertuples()."""
-        ticker = row.Ticker
-        txn_type = row.Type
-        quantity = abs(getattr(row, 'Quantity', 0))
-        amount = row.Amount_USD
-        date = row.Trade_Date
+        """Process a single transaction (as pandas Series)."""
+        ticker = row['Ticker']
+        txn_type = row['Type']
+        quantity = abs(row.get('Quantity', 0))
+        amount = row.get('Amount USD', 0)
+        date = row['Trade Date']
         
         if ticker not in self.holdings:
             self.holdings[ticker] = 0
@@ -243,6 +434,20 @@ class Portfolio:
             self.holdings[ticker] += quantity
             # Record holdings at this point in time
             self.holdings_history.append((date, ticker, self.holdings[ticker]))
+            
+        elif txn_type == "MARKET_SPLIT":
+            # Handle market data splits - multiply current holdings by split ratio
+            if ticker in self.holdings and self.holdings[ticker] > 0:
+                shares_before = self.holdings[ticker]
+                shares_after = shares_before * quantity  # quantity contains the split ratio
+                self.holdings[ticker] = shares_after
+                # Record holdings at this point in time
+                self.holdings_history.append((date, ticker, shares_after))
+                print(f"  {date.date()}: {ticker} {quantity}:1 split -> {shares_before:.4f} becomes {shares_after:.4f}")
+        
+        elif txn_type == "SPLIT":
+            # IGNORE CSV split data - we use market data instead
+            pass
     
     def buy_shares(self, ticker: str, date: Timestamp, amount: float, price: float) -> float:
         """Buy shares at a specific price."""
@@ -323,6 +528,7 @@ class Portfolio:
                     total += shares * valid_prices.iloc[-1]
         return total
     
+
     def calculate_xirr(self, end_date: Timestamp, end_value: float) -> Optional[float]:
         """Calculate money-weighted return (XIRR)."""
         if not self.cash_flows:
@@ -334,7 +540,7 @@ class Portfolio:
         amounts = [cf[1] for cf in flows]
         
         try:
-            return npf.xirr(amounts, dates)
+            return xirr(amounts, dates)
         except (ValueError, ZeroDivisionError) as e:
             print(f"Warning: Could not calculate XIRR. This can happen with unusual cash flows. Error: {e}")
             return None
@@ -347,11 +553,11 @@ def simulate_benchmark(df: pd.DataFrame, benchmark: str, prices: pd.Series,
     """Simulate investing in benchmark on same dates as actual trades."""
     portfolio = Portfolio()
     
-    # Process transactions
-    for row in df.itertuples(index=False, name='Transaction'):
-        date = row.Trade_Date
-        txn_type = row.Type
-        amount = abs(row.Amount_USD)
+    # Process transactions using iterrows for consistent column access
+    for _, row in df.iterrows():
+        date = row['Trade Date']
+        txn_type = row['Type']
+        amount = abs(row['Amount USD'])
         
         # Get price on transaction date
         valid_prices = prices[prices.index <= date]
@@ -374,7 +580,10 @@ def simulate_benchmark(df: pd.DataFrame, benchmark: str, prices: pd.Series,
             portfolio.add_cash_flow(date, amount)
             
         elif txn_type in ["DIVIDEND", "INTEREST"]:
-            portfolio.add_cash_flow(date, amount)
+            # Only include cash dividends/interest, not stock-specific dividends
+            # Stock-specific dividends don't apply to benchmark simulation
+            if row.get('Ticker', '') in ['', 'CASH'] or pd.isna(row.get('Ticker')):
+                portfolio.add_cash_flow(date, amount)
     
     # Reinvest all dividends
     portfolio.reinvest_dividends(benchmark, dividends, prices)
@@ -393,7 +602,7 @@ def analyze_portfolio(df: pd.DataFrame, benchmark: str = "VOO",
     df = consolidate_transaction_types(df)
     
     # Filter to equity transactions
-    equity_df = df[df["Type"].isin(["BUY", "SELL", "DIVIDEND", "REINVEST", "DEPOSIT", "WITHDRAWAL"])]
+    equity_df = df[df["Type"].isin(["BUY", "SELL", "DIVIDEND", "REINVEST", "DEPOSIT", "WITHDRAWAL", "SPLIT"])]
     
     # Date range - use pandas Timestamp objects
     start_dt = pd.Timestamp(df["Trade Date"].min())
@@ -407,18 +616,25 @@ def analyze_portfolio(df: pd.DataFrame, benchmark: str = "VOO",
     if benchmark not in tickers:
         tickers.append(benchmark)
     
-    # Fetch price data
+    # Fetch price data with progress
     print(f"Fetching price data for {len(tickers)} tickers...")
     prices = {}
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers):
         if ticker and " " not in ticker:  # Skip options
+            print(f"  {i+1}/{len(tickers)}: {ticker}")
             series = fetcher.get_prices(ticker, start_dt, end_dt)
             if not series.empty:
                 prices[ticker] = series
+            else:
+                print(f"    No data found for {ticker}")    
+    # Filter out CSV splits and add market splits 
+    equity_df = filter_out_csv_splits(equity_df)
+    equity_df = insert_market_splits_as_transactions(equity_df, fetcher, start_dt, end_dt)
     
-    # Process actual portfolio
+    # Process actual portfolio (now includes market splits as regular transactions)
+    print("Processing all transactions chronologically...")
     actual = Portfolio()
-    for row in equity_df.itertuples(index=False, name='Transaction'):
+    for _, row in equity_df.iterrows():
         actual.process_transaction(row)
     
     actual_value = actual.get_value(end_dt, prices)
@@ -432,10 +648,10 @@ def analyze_portfolio(df: pd.DataFrame, benchmark: str = "VOO",
     bench_value = bench.get_value(end_dt, {benchmark: bench_prices})
     bench_xirr = bench.calculate_xirr(end_dt, bench_value)
     
-    # Calculate metrics - net invested accounts for all cash flows
-    buys_and_deposits = abs(df[df["Type"].isin(["BUY", "DEPOSIT"])]["Amount USD"].sum())
-    sells_and_withdrawals = abs(df[df["Type"].isin(["SELL", "WITHDRAWAL"])]["Amount USD"].sum())
-    net_invested = buys_and_deposits - sells_and_withdrawals
+    # Calculate net invested: Money spent on purchases minus money received from sales
+    money_spent = abs(df[df["Type"] == "BUY"]["Amount USD"].sum())
+    money_received = df[df["Type"] == "SELL"]["Amount USD"].sum() 
+    net_invested = money_spent - money_received
     
     results = {
         "period": f"{start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}",
@@ -450,13 +666,65 @@ def analyze_portfolio(df: pd.DataFrame, benchmark: str = "VOO",
             "final_value": bench_value,
             "xirr": bench_xirr * 100 if bench_xirr else None,
             "total_return": (bench_value / net_invested - 1) * 100 if net_invested > 0 else 0
-        }
+        },
+        # Include portfolio and prices for detailed printing
+        "_actual_portfolio": actual,
+        "_prices": prices,
+        "_end_date": end_dt
     }
     
     if actual_xirr and bench_xirr:
         results["outperformance"] = (actual_xirr - bench_xirr) * 100
     
     return results
+
+
+def print_portfolio_holdings(actual: Portfolio, prices: Dict, end_date: pd.Timestamp):
+    """Print detailed portfolio holdings."""
+    print("\n" + "=" * 80)
+    print("CURRENT PORTFOLIO HOLDINGS")
+    print("=" * 80)
+    print(f"As of: {end_date.strftime('%Y-%m-%d')}")
+    print()
+    
+    total_value = 0
+    holdings_with_values = []
+    missing_tickers = []
+    
+    for ticker, shares in actual.holdings.items():
+        if shares > 0:
+            if ticker in prices and not prices[ticker].empty:
+                # Get most recent price
+                price_series = prices[ticker]
+                current_price = price_series.iloc[-1]
+                value = shares * current_price
+                total_value += value
+                holdings_with_values.append((ticker, shares, current_price, value))
+            else:
+                missing_tickers.append(ticker)
+                holdings_with_values.append((ticker, shares, 0, 0))
+    
+    # Sort by value descending
+    holdings_with_values.sort(key=lambda x: x[3], reverse=True)
+    
+    print("HOLDINGS WITH PRICE DATA:")
+    print(f"{'Ticker':<8} {'Shares':>12} {'Price':>12} {'Value':>15}")
+    print("-" * 50)
+    for ticker, shares, price, value in holdings_with_values:
+        if price > 0:
+            print(f"{ticker:<8} {shares:>12.4f} ${price:>11.2f} ${value:>14.2f}")
+    
+    if missing_tickers:
+        print(f"\nHOLDINGS WITHOUT PRICE DATA:")
+        print(f"{'Ticker':<8} {'Shares':>12}")
+        print("-" * 22)
+        for ticker, shares, price, value in holdings_with_values:
+            if price == 0:
+                print(f"{ticker:<8} {shares:>12.4f}")
+    
+    print(f"\nTOTAL VALUE (with price data): ${total_value:,.2f}")
+    if missing_tickers:
+        print(f"Missing price data for {len(missing_tickers)} tickers: {', '.join(missing_tickers)}")
 
 
 def print_results(results: Dict):
@@ -489,6 +757,9 @@ def print_results(results: Dict):
 # ---------------------------- Main ---------------------------- #
 
 def main():
+    # Load environment variables from .env file
+    load_dotenv()
+    
     parser = argparse.ArgumentParser(description="Portfolio XIRR analysis")
     parser.add_argument("--csv", required=True, help="Transaction CSV file")
     parser.add_argument("--benchmark", default="VOO", help="Benchmark ticker")
@@ -504,6 +775,12 @@ def main():
     # Load and analyze
     df = load_transactions(args.csv)
     results = analyze_portfolio(df, args.benchmark, args.end_date)
+    
+    # Print detailed holdings first
+    if "_actual_portfolio" in results:
+        print_portfolio_holdings(results["_actual_portfolio"], results["_prices"], results["_end_date"])
+    
+    # Then print performance summary
     print_results(results)
 
 
