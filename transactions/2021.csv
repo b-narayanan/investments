@@ -43,10 +43,10 @@ Trade Date,Type,Ticker,Security Type,Price USD,Quantity,Amount USD
 12/01/2021,Reinvest,QACDS,Money Market,0,0.07,-0.07
 11/26/2021,WDL,QACDS,Money Market,0,-4634.7,4634.7
 11/24/2021,WDL,QACDS,Money Market,0,-7400,7400
-11/23/2021,Buy,ADSK,Stock,15,308.98,-4634.7
+11/23/2021,Buy,ADSK,Stock,308.98,15,-4634.7
 11/23/2021,WDL,QACDS,Money Market,0,-2154.55,2154.55
 11/19/2021,DEPOSIT,,,0,0,8021.22
-11/19/2021,Buy,UPST,Stock,10,215.455,-2154.55
+11/19/2021,Buy,UPST,Stock,215.455,10,-2154.55
 11/19/2021,DBS,QACDS,Money Market,0,8021.22,-8021.22
 11/15/2021,WDL,QACDS,Money Market,0,-3705.66,3705.66
 11/12/2021,Dividend,ASML,Stock,0,0,14.59
@@ -54,7 +54,7 @@ Trade Date,Type,Ticker,Security Type,Price USD,Quantity,Amount USD
 11/12/2021,WHT,ASML,Stock,0,0,-2.18
 11/11/2021,Dividend,AAPL,Stock,0,0,22.11
 11/11/2021,Reinvest,AAPL,Stock,0,0.1484,-22.11
-11/10/2021,Buy,UPST,Stock,14,264.69,-3705.66
+11/10/2021,Buy,UPST,Stock,264.69,44,-11646.36
 11/09/2021,Dividend,MA,Stock,0,0,13.28
 11/09/2021,Reinvest,MA,Stock,0,0.03853,-13.28
 11/05/2021,Dividend,SCHZ,Stock,0,0,0.59

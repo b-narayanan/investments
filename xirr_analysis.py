@@ -23,7 +23,6 @@ import scipy.optimize
 
 def xnpv(rate, values, dates):
     '''Equivalent of Excel's XNPV function.
-
     >>> from datetime import date
     >>> dates = [date(2010, 12, 29), date(2012, 1, 25), date(2012, 3, 8)]
     >>> values = [-10000, 20, 10100]
@@ -37,7 +36,6 @@ def xnpv(rate, values, dates):
 
 def xirr(amounts: List[float], dates: List[Timestamp]) -> float:
     '''Equivalent of Excel's XIRR function.
-
     >>> from datetime import date
     >>> dates = [date(2010, 12, 29), date(2012, 1, 25), date(2012, 3, 8)]
     >>> values = [-10000, 20, 10100]
@@ -45,9 +43,9 @@ def xirr(amounts: List[float], dates: List[Timestamp]) -> float:
     0.0100612...
     '''
     try:
-        return scipy.optimize.newton(lambda r: xnpv(r, amounts, dates), 0.0)
+        return optimize.newton(lambda r: xnpv(r, amounts, dates), 0.0)
     except RuntimeError:    # Failed to converge?
-        return scipy.optimize.brentq(lambda r: xnpv(r, amounts, dates), -1.0, 1e10)
+        return optimize.brentq(lambda r: xnpv(r, amounts, dates), -1.0, 1e10)
 
 # ---------------------------- Configuration ---------------------------- #
 

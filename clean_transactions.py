@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/miniconda3/envs/antichain/bin/python
 """
 Transaction Reconciliation and Portfolio Analysis Tool
 
@@ -12,15 +12,12 @@ The goal is to achieve near-perfect reconciliation between computed positions
 from transaction history and actual current portfolio holdings.
 """
 
-# Imports
 import pandas as pd
 import glob
 import os
 from typing import Dict, Tuple, List
 
-# ==============================================================================
-# Configuration
-# ==============================================================================
+# ---------------------------- Configuration ---------------------------- #
 
 CONFIG = {
     'files': {
@@ -34,10 +31,14 @@ CONFIG = {
         'small_quantity_threshold': 0.5,
         'etf_extended_threshold': 100
     },
-    'etf_tickers': [
+    'etf_tickers': {
         'VGT', 'VOO', 'VOX', 'VDC', 'SCHX', 'SCHA', 'SCHF', 'SCHZ', 'VTI', 'QQQ', 
-        'FCOM', 'FTEC', 'FHLC', 'IYW', 'AVB', 'BTCO'
-    ],
+        'FCOM', 'FTEC', 'FHLC', 'IYW'
+    },
+    'cash_equivalents': {
+        "VMFXX", "QACDS", "SWVXX", "SPAXX", "SNVXX", "FDRXX", 
+        "FGXX", "SPRXX", "SNAXX", "VMMXX", "VMSXX"
+    },
     'corporate_actions': [
         {
             'date': '2022-05-24',
@@ -47,6 +48,13 @@ CONFIG = {
             'conversion_ratio': 0.0406,
             'cash_in_lieu': 22.08,
             'description': 'ZNGA acquired by TTWO - 300 shares -> 12 shares + cash'
+        },
+        {
+            'date': '2022-10-04',
+            'type': 'stock_split',
+            'ticker': 'NTDOY',
+            'split_ratio': 5,
+            'description': 'NTDOY 5-for-1 stock split'
         }
     ],
     'match_tolerances': {
@@ -56,10 +64,7 @@ CONFIG = {
     }
 }
 
-
-# ==============================================================================
-# Data Loading Functions
-# ==============================================================================
+# ---------------------------- Data Loading ---------------------------- #
 
 def load_current_holdings(filepath: str) -> Dict[str, float]:
     """
@@ -69,7 +74,8 @@ def load_current_holdings(filepath: str) -> Dict[str, float]:
         filepath: Path to the current holdings text file.
 
     Returns:
-        A dictionary mapping ticker symbols to share quantities.
+        A dictionary mapping ticker symbols to share quantities,
+        excluding cash equivalents.
     """
     holdings = {}
     with open(filepath, 'r') as f:
@@ -84,6 +90,9 @@ def load_current_holdings(filepath: str) -> Dict[str, float]:
         parts = line.split()
         if len(parts) >= 4 and line[0].isalpha():
             ticker = parts[0]
+            # Skip cash equivalents
+            if ticker in CONFIG['cash_equivalents']:
+                continue
             try:
                 shares_str = parts[1].replace(',', '')
                 holdings[ticker] = float(shares_str)
@@ -127,10 +136,7 @@ def load_historical_transactions(file_pattern: str) -> pd.DataFrame:
         combined_df['Trade_Date'] = pd.to_datetime(combined_df['Trade Date'])
     return combined_df
 
-
-# ==============================================================================
-# Data Processing Functions
-# ==============================================================================
+# ---------------------------- Data Processing ---------------------------- #
 
 def classify_transaction_type(row: pd.Series) -> str:
     """
@@ -242,6 +248,20 @@ def handle_corporate_actions(actions: List[Dict]) -> pd.DataFrame:
                 'Price USD': 0.0, 'Quantity': -original_shares, 'Amount USD': 0.0,
                 'Transaction_Type': 'CONVERSION'
             })
+        elif action['type'] == 'stock_split':
+            # For stock splits, we need to know the pre-split share count
+            # NOTE: Hardcoding NTDOY position as 100 shares pre-split
+            if action['ticker'] == 'NTDOY':
+                original_shares = 100
+                additional_shares = original_shares * (action['split_ratio'] - 1)
+                
+                # Add shares from the split
+                corporate_transactions.append({
+                    'Trade Date': action['date'], 'Type': 'Stock_Split',
+                    'Ticker': action['ticker'], 'Security Type': 'Stock',
+                    'Price USD': 0.0, 'Quantity': additional_shares, 'Amount USD': 0.0,
+                    'Transaction_Type': 'SPLIT'
+                })
             
     return pd.DataFrame(corporate_transactions)
 
@@ -261,20 +281,24 @@ def create_complete_transaction_history() -> pd.DataFrame:
     main_df = load_and_classify_transactions(CONFIG['files']['transactions'])
     historical_df = load_historical_transactions(CONFIG['files']['historical_pattern'])
     
-    # 2. Get historical lifecycle and corporate actions.
+    # 2. Filter out cash equivalents from both dataframes
+    main_df = main_df[~main_df['Ticker'].isin(CONFIG['cash_equivalents'])]
+    historical_df = historical_df[~historical_df['Ticker'].isin(CONFIG['cash_equivalents'])]
+    
+    # 3. Get historical lifecycle and corporate actions.
     historical_buys, historical_sells = get_complete_historical_lifecycle(historical_df)
     corporate_df = handle_corporate_actions(CONFIG['corporate_actions'])
     
-    # 3. Add transaction types to new dataframes, avoiding SettingWithCopyWarning.
+    # 4. Add transaction types to new dataframes, avoiding SettingWithCopyWarning.
     if not historical_buys.empty:
         historical_buys = historical_buys.assign(Transaction_Type='BUY')
     if not historical_sells.empty:
         historical_sells = historical_sells.assign(Transaction_Type='SELL')
 
-    # 4. Combine all sources.
+    # 5. Combine all sources.
     complete_df = pd.concat([main_df, historical_buys, historical_sells, corporate_df], ignore_index=True)
     
-    # 5. Standardize and deduplicate.
+    # 6. Standardize and deduplicate.
     complete_df['Trade Date'] = pd.to_datetime(complete_df['Trade Date'], format='mixed', errors='coerce')
     
     complete_df['Abs_Amount'] = complete_df['Amount USD'].abs()
@@ -289,10 +313,7 @@ def create_complete_transaction_history() -> pd.DataFrame:
         
     return complete_df.drop(columns=['Abs_Amount'])
 
-
-# ==============================================================================
-# Reconciliation Functions
-# ==============================================================================
+# ---------------------------- Reconciliation ---------------------------- #
 
 def compute_final_positions(complete_df: pd.DataFrame) -> Tuple[Dict, Dict]:
     """
@@ -368,10 +389,7 @@ def reconcile_positions(
     
     return pd.DataFrame(results)
 
-
-# ==============================================================================
-# Reporting Functions
-# ==============================================================================
+# ---------------------------- Reporting ---------------------------- #
 
 def print_header():
     """Prints the main header for the script output."""
